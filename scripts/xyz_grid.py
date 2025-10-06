@@ -256,6 +256,8 @@ axis_options = [
     AxisOption("Sigma min", float, apply_field("s_tmin")),
     AxisOption("Sigma max", float, apply_field("s_tmax")),
     AxisOption("Sigma noise", float, apply_field("s_noise")),
+    AxisOption("Epsilon scaling factor", float, apply_override("epsilon_scaling_factor")),
+    AxisOption("Epsilon scaling enabled", str, apply_override("epsilon_scaling_enabled", boolean=True), choices=boolean_choice()),
     AxisOption("Schedule type", str, apply_field("scheduler"), choices=lambda: [x.label for x in sd_schedulers.schedulers]),
     AxisOption("Schedule min sigma", float, apply_override("sigma_min")),
     AxisOption("Schedule max sigma", float, apply_override("sigma_max")),
