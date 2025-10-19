@@ -1,4 +1,4 @@
-from collections import namedtuple
+from collections import namedtuple, Counter
 from copy import copy
 from itertools import permutations, chain
 import random
@@ -449,11 +449,94 @@ def draw_xyz_grid(p, xs, ys, zs, x_labels, y_labels, z_labels, cell, draw_legend
 
 class SharedSettingsStackHelper(object):
     def __enter__(self):
-        pass
+        model_data = getattr(modules.sd_models, "model_data", None)
+        self._initial_model_counts = Counter()
+        self._initial_active_filename = None
+
+        if model_data is not None:
+            for model in getattr(model_data, "loaded_sd_models", []):
+                filename = self._get_model_filename(model)
+                if filename:
+                    self._initial_model_counts[filename] += 1
+            self._initial_active_filename = self._get_model_filename(getattr(model_data, "sd_model", None))
+
+        return self
 
     def __exit__(self, exc_type, exc_value, tb):
-        modules.sd_models.reload_model_weights()
-        modules.sd_vae.reload_vae_weights()
+        try:
+            self._flush_new_models()
+            self._restore_initial_active()
+        finally:
+            modules.sd_models.reload_model_weights()
+            modules.sd_vae.reload_vae_weights()
+
+    def _flush_new_models(self):
+        if not hasattr(self, "_initial_model_counts"):
+            return
+
+        model_data = getattr(modules.sd_models, "model_data", None)
+        if model_data is None:
+            return
+
+        counts = Counter(self._initial_model_counts)
+        to_remove = []
+
+        for idx, model in enumerate(list(getattr(model_data, "loaded_sd_models", []))):
+            filename = self._get_model_filename(model)
+            if not filename:
+                continue
+
+            if counts.get(filename, 0) > 0:
+                counts[filename] -= 1
+                continue
+            to_remove.append(idx)
+
+        if not to_remove:
+            return
+
+        for idx in sorted(to_remove, reverse=True):
+            modules.sd_models.unload_specific_model(idx)
+
+        if hasattr(modules.sd_models, "model_management"):
+            modules.sd_models.model_management.soft_empty_cache(force=True)
+
+        gc.collect()
+        gc.collect()
+
+    def _restore_initial_active(self):
+        if not self._initial_active_filename:
+            return
+
+        model_data = getattr(modules.sd_models, "model_data", None)
+        if model_data is None:
+            return
+
+        current_active = self._get_model_filename(getattr(model_data, "sd_model", None))
+        if current_active == self._initial_active_filename:
+            return
+
+        target_index = None
+        for idx, model in enumerate(getattr(model_data, "loaded_sd_models", [])):
+            if self._get_model_filename(model) == self._initial_active_filename:
+                target_index = idx
+                break
+
+        if target_index is not None:
+            modules.sd_models.set_model_active(target_index)
+        else:
+            # Fallback: ensure at least active model is unloaded to free VRAM
+            modules.sd_models.unload_model_weights()
+
+    @staticmethod
+    def _get_model_filename(model):
+        if model is None:
+            return None
+
+        info = getattr(model, "sd_checkpoint_info", None)
+        if info is not None and hasattr(info, "filename"):
+            return info.filename
+
+        return getattr(model, "filename", None)
 
 
 re_range = re.compile(r"\s*([+-]?\s*\d+)\s*-\s*([+-]?\s*\d+)(?:\s*\(([+-]\d+)\s*\))?\s*")
