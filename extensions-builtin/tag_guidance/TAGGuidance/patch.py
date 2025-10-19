@@ -83,7 +83,6 @@ def _apply_ctag(x, sigma, cond, uncond, cond_scale, ctag_eta):
     extra = alpha * g_tan
     guided_eps = uncond_eps + cond_scale * g + ctag_eta * extra
     guided = x_float - guided_eps * sigma_float
-    print(f"[TAG] C-TAG applied (eta={ctag_eta})")
     return guided.to(dtype=cond.dtype)
 
 
@@ -110,3 +109,4 @@ def patch_model_with_tag(model: ModelPatcher, eta: float, ctag_eta: float = 0.0)
 
     patched.set_model_sampler_post_cfg_function(tag_post_cfg, disable_cfg1_optimization=True)
     return (patched,)
+
