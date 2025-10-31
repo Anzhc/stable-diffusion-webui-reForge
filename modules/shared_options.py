@@ -255,6 +255,16 @@ options_templates.update(options_section(('epsilon_scaling', "Epsilon Scaling", 
     "epsilon_scaling_factor": OptionInfo(1.005, "Epsilon scaling factor", gr.Slider, {"minimum": 0.5, "maximum": 1.5, "step": 0.001}).info("Noise scaling multiplier from 'Elucidating the Exposure Bias in Diffusion Models'."),
 }))
 
+options_templates.update(options_section(('multi_res_guidance', "Multi-resolution Guidance", "sd"), {
+    "multi_res_guidance_enable": OptionInfo(False, "Enable multi-resolution blur guidance").info("Blends the denoised field with a blurred version during early steps to encourage global structure."),
+    "multi_res_guidance_lambda_max": OptionInfo(0.5, "Initial blend weight λ₀", gr.Slider, {"minimum": 0.0, "maximum": 1.0, "step": 0.01}).info("Starting weight for the blurred ε field; anneals to zero over the early portion of sampling."),
+    "multi_res_guidance_decay_pct": OptionInfo(0.35, "Anneal coverage", gr.Slider, {"minimum": 0.05, "maximum": 0.8, "step": 0.01}).info("Fraction of total steps over which λ decays to zero. Only applied while log SNR is above the cutoff."),
+    "multi_res_guidance_logsnr_cutoff": OptionInfo(0.0, "Log SNR cutoff", gr.Slider, {"minimum": -5.0, "maximum": 5.0, "step": 0.1}).info("Disable blur mixing once log(σ²) drops below this value; 0 ≈ σ ≥ 1."),
+    "multi_res_guidance_lp_sigma": OptionInfo(1.0, "Blur σ (latent pixels)", gr.Slider, {"minimum": 0.0, "maximum": 100.0, "step": 0.05}).info("Gaussian blur radius for the ε field; higher values emphasize large-scale structure."),
+    "multi_res_guidance_blur_boost": OptionInfo(0.5, "Blur boost", gr.Slider, {"minimum": 0.0, "maximum": 3.0, "step": 0.05}).info("Extra gain applied to the blurred guidance as λ grows; effective blend becomes λ_eff = λ · (1 + λ · boost)."),
+    "multi_res_guidance_fallback_steps": OptionInfo(20, "Fallback step count", gr.Slider, {"minimum": 1, "maximum": 200, "step": 1}).info("Used to schedule the anneal when the sampler does not expose its step count."),
+}))
+
 options_templates.update(options_section(('img2img', "img2img", "sd"), {
     "inpainting_mask_weight": OptionInfo(1.0, "Inpainting conditioning mask strength", gr.Slider, {"minimum": 0.0, "maximum": 1.0, "step": 0.01}, infotext='Conditional mask weight'),
     "initial_noise_multiplier": OptionInfo(1.0, "Noise multiplier for img2img", gr.Slider, {"minimum": 0.0, "maximum": 1.5, "step": 0.001}, infotext='Noise multiplier'),

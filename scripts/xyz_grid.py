@@ -266,6 +266,7 @@ axis_options = [
     AxisOption("Beta schedule alpha", float, apply_override("beta_dist_alpha")),
     AxisOption("Beta schedule beta", float, apply_override("beta_dist_beta")),
     AxisOption("Eta", float, apply_field("eta")),
+    AxisOption("Multi-res blur guidance", str, apply_override("multi_res_guidance_enable", boolean=True), choices=boolean_choice()),
     AxisOption("Clip skip", int, apply_override('CLIP_stop_at_last_layers')),
     AxisOption("Denoising", float, apply_field("denoising_strength")),
     AxisOption("Initial noise multiplier", float, apply_field("initial_noise_multiplier")),

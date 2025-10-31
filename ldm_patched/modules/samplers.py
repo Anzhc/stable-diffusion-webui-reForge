@@ -10,6 +10,8 @@ if TYPE_CHECKING:
     from ldm_patched.modules.model_base import BaseModel
     from ldm_patched.modules.controlnet import ControlBase
 import torch
+import torch.nn.functional as F
+import random
 from functools import partial
 import collections
 from ldm_patched.modules import model_management
@@ -360,6 +362,123 @@ def calc_cond_uncond_batch(model, cond, uncond, x_in, timestep, model_options): 
 
 import math
 
+def _multi_res_estimate_total_steps(model_options):
+    transformer_options = model_options.get("transformer_options", {})
+    sigmas = transformer_options.get("sample_sigmas")
+    if isinstance(sigmas, torch.Tensor):
+        return max(int(sigmas.shape[0] - 1), 1)
+    if isinstance(sigmas, (list, tuple)):
+        return max(len(sigmas) - 1, 1)
+    return None
+
+
+def _multi_res_prepare_blur_state(model_options):
+    run_id = model_options.get("_multi_res_blur_run_id")
+    state = model_options.get("_multi_res_blur_state")
+    if state is None or state.get("run_id") != run_id:
+        state = {
+            "initialized": True,
+            "step_index": 0,
+            "announce_done": False,
+            "total_steps": _multi_res_estimate_total_steps(model_options),
+            "run_id": run_id,
+        }
+        model_options["_multi_res_blur_state"] = state
+    return state
+
+
+def _multi_res_sigma_tensor(sigma, reference, dtype=torch.float32):
+    if isinstance(sigma, torch.Tensor):
+        tensor = sigma.to(device=reference.device, dtype=dtype)
+    else:
+        tensor = torch.tensor([float(sigma)], device=reference.device, dtype=dtype)
+    if tensor.dim() == 0:
+        tensor = tensor.view(1)
+    if tensor.shape[0] != reference.shape[0]:
+        tensor = tensor.view(1).expand(reference.shape[0])
+    return tensor
+
+
+def _multi_res_gaussian_blur(latent: torch.Tensor, sigma_px: float):
+    if sigma_px <= 0 or latent.dim() != 4:
+        return latent
+    radius = max(int(math.ceil(sigma_px * 2.0)), 1)
+    kernel_size = radius * 2 + 1
+    if kernel_size <= 1:
+        return latent
+    coords = torch.arange(kernel_size, device=latent.device, dtype=latent.dtype) - radius
+    denom = max(sigma_px, 1e-6) ** 2 * 2.0
+    kernel_1d = torch.exp(-(coords ** 2) / denom)
+    kernel_1d = kernel_1d / kernel_1d.sum()
+    kernel2d = torch.outer(kernel_1d, kernel_1d)
+    kernel2d = kernel2d / kernel2d.sum()
+    kernel2d = kernel2d.view(1, 1, kernel_size, kernel_size).repeat(latent.shape[1], 1, 1, 1)
+    padding = kernel_size // 2
+    padded = F.pad(latent, (padding, padding, padding, padding), mode="reflect")
+    return F.conv2d(padded, kernel2d, groups=latent.shape[1])
+
+
+def _apply_multi_res_guidance(model, cfg_result, x, sigma, cond, uncond, cond_scale, model_options):
+    opts = shared.opts
+    if not getattr(opts, "multi_res_guidance_enable", False):
+        return cfg_result
+    if cond is None or x.dim() != 4:
+        return cfg_result
+
+    state = _multi_res_prepare_blur_state(model_options)
+    step_index = state.get("step_index", 0)
+    total_steps = state.get("total_steps")
+
+    lp_sigma = float(getattr(opts, "multi_res_guidance_lp_sigma", 1.0))
+    if lp_sigma <= 0:
+        state["step_index"] = step_index + 1
+        return cfg_result
+
+    lambda_max = float(getattr(opts, "multi_res_guidance_lambda_max", 0.5))
+    if lambda_max <= 0:
+        state["step_index"] = step_index + 1
+        return cfg_result
+
+    decay_pct = float(getattr(opts, "multi_res_guidance_decay_pct", 0.35))
+    logsnr_cut = float(getattr(opts, "multi_res_guidance_logsnr_cutoff", 0.0))
+
+    sigma_tensor = _multi_res_sigma_tensor(sigma, x, dtype=torch.float32)
+    if sigma_tensor.numel() == 0:
+        state["step_index"] = step_index + 1
+        return cfg_result
+    sigma_scalar = float(sigma_tensor.flatten()[0])
+    if sigma_scalar <= 0:
+        state["step_index"] = step_index + 1
+        return cfg_result
+
+    base_steps = total_steps if total_steps is not None else getattr(opts, "multi_res_guidance_fallback_steps", 20)
+    base_steps = max(int(base_steps), 1)
+    coverage_steps = max(int(math.ceil(max(decay_pct, 1e-3) * base_steps)), 1)
+    progress = min(step_index / coverage_steps, 1.0)
+    lambda_weight = lambda_max * 0.5 * (1.0 + math.cos(math.pi * progress)) if step_index < coverage_steps else 0.0
+
+    logsnr = math.log(max(sigma_scalar ** 2, 1e-12))
+    if logsnr < logsnr_cut:
+        lambda_weight = 0.0
+
+    if lambda_weight <= 0:
+        state["step_index"] = step_index + 1
+        return cfg_result
+
+    denoised_fp32 = cfg_result.to(torch.float32)
+    blurred = _multi_res_gaussian_blur(denoised_fp32, lp_sigma)
+    blur_boost = float(getattr(opts, "multi_res_guidance_blur_boost", 0.0))
+    scaled_lambda = lambda_weight * (1.0 + lambda_weight * blur_boost)
+    mixed = denoised_fp32 + scaled_lambda * (blurred - denoised_fp32)
+
+    state["step_index"] = step_index + 1
+    if not state.get("announce_done", False):
+        print(f"[MultiRes ε-guidance] Blur mixing activated (λ={lambda_weight:.3f}, λ_eff={scaled_lambda:.3f}, blur_sigma={lp_sigma})")
+        state["announce_done"] = True
+
+    return mixed.to(cfg_result.dtype)
+
+
 def _epsilon_scaling_post_cfg(args, scaling_factor: float):
     """Scale the denoised prediction by adjusting the predicted noise."""
     denoised = args["denoised"]
@@ -397,6 +516,9 @@ def cfg_function(model, cond_pred, uncond_pred, cond_scale, x, timestep, model_o
         args = {"denoised": cfg_result, "cond": cond, "uncond": uncond, "cond_scale": cond_scale, "model": model, "uncond_denoised": uncond_pred, "cond_denoised": cond_pred,
                 "sigma": timestep, "model_options": model_options, "input": x}
         cfg_result = fn(args)
+
+    if model_options.get("_multi_res_guidance_guard", 0) == 0:
+        cfg_result = _apply_multi_res_guidance(model, cfg_result, x, timestep, cond, uncond, cond_scale, model_options)
 
     if getattr(shared.opts, "epsilon_scaling_enabled", False):
         scaling_factor = getattr(shared.opts, "epsilon_scaling_factor", 1.005)
@@ -1163,6 +1285,7 @@ class CFGGuider:
         self.conds = process_conds(self.inner_model, noise, self.conds, device, latent_image, denoise_mask, seed)
 
         extra_model_options = ldm_patched.modules.model_patcher.create_model_options_clone(self.model_options)
+        extra_model_options["_multi_res_blur_run_id"] = random.getrandbits(32)
         extra_model_options.setdefault("transformer_options", {})["sample_sigmas"] = sigmas
         extra_args = {"model_options": extra_model_options, "seed": seed}
 
