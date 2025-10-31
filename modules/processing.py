@@ -33,6 +33,7 @@ import modules.sd_vae as sd_vae
 from ldm.data.util import AddMiDaS
 from ldm.models.diffusion.ddpm import LatentDepth2ImageDiffusion
 from ldm_patched.modules.model_sampling import rescale_zero_terminal_snr_sigmas
+from ldm_patched.modules.block_noise import apply_reso_block_noise
 
 from einops import repeat, rearrange
 from blendmodes.blend import blendLayers, BlendType
@@ -43,6 +44,36 @@ from modules_forge.forge_util import apply_circular_forge
 # some of those options should not be changed at all because they would break the model, so I removed them from options.
 opt_C = 4
 opt_f = 8
+
+
+def maybe_apply_block_noise(noise: torch.Tensor, latents: torch.Tensor | None = None) -> torch.Tensor:
+    if not getattr(opts, "block_noise_enable", False):
+        return noise
+
+    if noise is None or not isinstance(noise, torch.Tensor) or noise.ndim != 4 or noise.shape[0] == 0:
+        return noise
+
+    base_resolution = int(getattr(opts, "block_noise_base_resolution", 512) or 512)
+    scale_quant_step = float(getattr(opts, "block_noise_scale_quant_step", 0.5) or 0.5)
+    train_timesteps_raw = getattr(opts, "block_noise_num_train_timesteps", None)
+    if train_timesteps_raw and train_timesteps_raw > 1:
+        num_train_timesteps: int | None = int(train_timesteps_raw)
+    else:
+        num_train_timesteps = None
+
+    if latents is None or not isinstance(latents, torch.Tensor):
+        latents = noise
+
+    return apply_reso_block_noise(
+        noise=noise,
+        latents=latents,
+        timesteps=None,
+        target_sizes_hw=None,
+        enabled=True,
+        base_resolution=base_resolution,
+        num_train_timesteps=num_train_timesteps,
+        scale_quant_step=scale_quant_step,
+    )
 
 
 def setup_color_correction(image):
@@ -1356,6 +1387,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
             # here we generate an image normally
 
             x = self.rng.next()
+            x = maybe_apply_block_noise(x)
 
             self.sd_model.forge_objects = self.sd_model.forge_objects_after_applying_lora.shallow_copy()
             apply_token_merging(self.sd_model, self.get_token_merging_ratio())
@@ -1456,6 +1488,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
         self.rng = rng.ImageRNG(samples.shape[1:], self.seeds, subseeds=self.subseeds, subseed_strength=self.subseed_strength, seed_resize_from_h=self.seed_resize_from_h, seed_resize_from_w=self.seed_resize_from_w)
         noise = self.rng.next()
+        noise = maybe_apply_block_noise(noise, latents=samples)
 
         # GC now before running the next img2img to prevent running out of memory
         devices.torch_gc()
@@ -1807,6 +1840,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
     def sample(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):
         x = self.rng.next()
+        latent_ref = self.init_latent if isinstance(self.init_latent, torch.Tensor) else None
+        x = maybe_apply_block_noise(x, latents=latent_ref if latent_ref is not None else x)
 
         if self.initial_noise_multiplier != 1.0:
             self.extra_generation_params["Noise multiplier"] = self.initial_noise_multiplier

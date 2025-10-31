@@ -265,6 +265,13 @@ options_templates.update(options_section(('multi_res_guidance', "Multi-resolutio
     "multi_res_guidance_fallback_steps": OptionInfo(20, "Fallback step count", gr.Slider, {"minimum": 1, "maximum": 200, "step": 1}).info("Used to schedule the anneal when the sampler does not expose its step count."),
 }))
 
+options_templates.update(options_section(('block_noise', "Block Noise", "sd"), {
+    "block_noise_enable": OptionInfo(False, "Enable block noise mixing for the initial latent noise").info("Inject structured low-frequency noise for large resolutions to better match low-resolution SNR."),
+    "block_noise_base_resolution": OptionInfo(512, "Block noise base resolution", gr.Slider, {"minimum": 64, "maximum": 4096, "step": 64}),
+    "block_noise_scale_quant_step": OptionInfo(0.5, "Block noise scale quantization step", gr.Slider, {"minimum": 0.1, "maximum": 2.0, "step": 0.05}),
+    "block_noise_num_train_timesteps": OptionInfo(1000, "Reference training timestep count", gr.Slider, {"minimum": 0, "maximum": 5000, "step": 1}),
+}))
+
 options_templates.update(options_section(('img2img', "img2img", "sd"), {
     "inpainting_mask_weight": OptionInfo(1.0, "Inpainting conditioning mask strength", gr.Slider, {"minimum": 0.0, "maximum": 1.0, "step": 0.01}, infotext='Conditional mask weight'),
     "initial_noise_multiplier": OptionInfo(1.0, "Noise multiplier for img2img", gr.Slider, {"minimum": 0.0, "maximum": 1.5, "step": 0.001}, infotext='Noise multiplier'),
